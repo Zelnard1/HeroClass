@@ -1,0 +1,2161 @@
+      // Function to serve HTML for the web app
+      Logger.log("💥 This version is LIVE and linked!");
+      function doGet() {
+        // Load Wheel of Destiny Data
+        const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Wheel of Destiny Data');
+        const data = sheet.getRange('A2:B19').getValues(); // Fetch data for the Wheel
+        Logger.log("🚀 Running latest deployed version with getLiveTickerData!");
+
+        // Map data into a usable format
+        const imageData = data.map(row => ({
+          number: row[0],
+          url: row[1],
+        }));
+
+        // Embed data into the player dashboard
+        const template = HtmlService.createTemplateFromFile('Index');
+        template.imageData = JSON.stringify(imageData); // Pass image data to the frontend
+        return template.evaluate()
+          .setTitle('Player Dashboard')
+          .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+      }
+
+
+
+      // Global variables for logging
+      var LOG_SHEET_NAME = "GameFeed";
+      var PET_IMAGE_SHEET_NAME = "Pet Lookup";
+      var PET_IMAGE_CYCLE_START = 2;
+      var PET_IMAGE_CYCLE_END = 15;
+      var DAILY_CRYSTAL_CAPS = {
+        Healer: 5,
+        Guardian: 4,
+        Mage: 6
+      };
+
+        function getMaxValues(characterClass, level) {
+        let maxHealth = 0;
+        let maxCrystals = 0;
+
+        switch (characterClass) {
+          case "Guardian":
+            maxHealth = 10;
+            maxCrystals = 4;
+            break;
+          case "Healer":
+            maxHealth = 8;
+            maxCrystals = 5;
+            break;
+          case "Mage":
+            maxHealth = 6;
+            maxCrystals = 6;
+            break;
+        }
+
+        // Bonus levels logic
+        if (level >= 25) {
+          maxHealth += 2;
+          maxCrystals += 2;
+        } else if (level >= 15) {
+          maxHealth += 1;
+          maxCrystals += 1;
+        }
+
+        return { maxHealth, maxCrystals };
+      }
+
+      // Main onEdit function for handling sheet edits
+      function onEdit(e) {
+          const sheet = e.source.getActiveSheet();
+          const editedCell = e.range;
+
+          const maxValues = {
+              Healer: { health: 8, crystals: 5 },
+              Mage: { health: 6, crystals: 6 },
+              Guardian: { health: 10, crystals: 4 }
+          };
+          
+          // Handle edits in the "XP, Mana, Health" sheet
+          if (sheet.getName() === "XP, Mana, Health") {
+              const inputToTotalMap = { 9: 5, 10: 6, 11: 7, 12: 8 }; // IJKL -> EFGH
+              const row = editedCell.getRow();
+              const col = editedCell.getColumn();
+
+              console.log(`onEdit triggered: Sheet: XP, Mana, Health | Row: ${row} | Column: ${col}`);
+
+              // Process input values and apply maximum limits
+              if (inputToTotalMap[col]) {
+                  const totalCol = inputToTotalMap[col];
+                  const inputValue = editedCell.getValue();
+
+                  console.log(`Processing input: Row ${row}, Column ${col}, Value: ${inputValue}`);
+
+                  if (inputValue && !isNaN(inputValue)) {
+                      const currentTotal = sheet.getRange(row, totalCol).getValue() || 0;
+                      let newTotal = currentTotal + inputValue;
+                      const playerClass = sheet.getRange(row, 2).getValue(); // Column B
+                      const level = sheet.getRange(row, 3).getValue(); // Column C: Level
+                      const { maxHealth, maxCrystals } = getMaxValues(playerClass, level);
+                      if (totalCol === 6) newTotal = Math.min(newTotal, maxHealth);
+                      if (totalCol === 7) newTotal = Math.min(newTotal, maxCrystals);
+
+                      sheet.getRange(row, totalCol).setValue(newTotal);
+                      sheet.getRange(row, col).setValue(""); // Clear input cell
+
+                      console.log(`Updated totals: Row ${row}, Column ${totalCol}, New Total: ${newTotal}`);
+                      
+                      // Trigger level update for XP column (E) after updating it
+                      if (totalCol === 5) {
+                          console.log(`Recalculating levels due to updated XP in Column E for Row ${row}`);
+                          updatePlayerLevels();
+                      }
+
+                      // Log manual entries
+                      const playerName = sheet.getRange(row, 1).getValue();
+                      const statType = col === 9 ? "XP" : col === 10 ? "Health" : col === 11 ? "Crystals" : "GP";
+                      logGameAction(playerName, statType, inputValue, "Manual Entry");
+                  }
+              }
+
+              // Trigger level update when XP column (E) is updated
+              if (col === 5) {
+                  console.log(`XP updated in Column E for Row ${row}`);
+                  updatePlayerLevels();
+              }
+          }
+          // Handle edits in the "GameFeed" sheet for tickertape updates
+          if (sheet.getName() === "GameFeed") {
+              console.log(`onEdit triggered: Sheet: GameFeed | Broadcasting tickertape update.`);
+              const latestEntries = getLatestGameFeedEntries();
+              broadcastTickertapeUpdate(latestEntries);
+          }
+
+          // Handle edits in the "Teams" sheet
+          if (sheet.getName() === "Teams") {
+              const row = editedCell.getRow();
+              const col = editedCell.getColumn();
+              const addedValue = editedCell.getValue();
+              const playerName = sheet.getRange(row, 2).getValue();
+
+              console.log(`onEdit triggered: Sheet: Teams | Row: ${row} | Column: ${col} | Value: ${addedValue}`);
+
+              if (addedValue && !isNaN(addedValue)) {
+                  const xpSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+                  const playerNames = xpSheet.getRange("A2:A100").getValues();
+
+                  for (let i = 0; i < playerNames.length; i++) {
+                      if (playerNames[i][0] === playerName) {
+                          let targetCol, statType;
+
+                          if (col === 10) { targetCol = 5; statType = "XP"; }
+                          else if (col === 11) { targetCol = 6; statType = "Health"; }
+                          else if (col === 12) { targetCol = 7; statType = "Crystals"; }
+                          else if (col === 13) { targetCol = 8; statType = "GP"; }
+                          else return;
+
+                          const currentTotal = xpSheet.getRange(i + 2, targetCol).getValue() || 0;
+                          let newTotal = currentTotal + addedValue;
+
+                          // Apply maximum limits for Health and Crystals
+                          const level = xpSheet.getRange(i + 2, 3).getValue(); // Column C: Level
+      const { maxHealth, maxCrystals } = getMaxValues(playerClass, level);
+      if (targetCol === 6) newTotal = Math.min(newTotal, maxHealth);
+      if (targetCol === 7) newTotal = Math.min(newTotal, maxCrystals);
+
+
+                          xpSheet.getRange(i + 2, targetCol).setValue(newTotal);
+                          editedCell.setValue(""); // Clear input cell
+
+                          logGameAction(playerName, statType, addedValue, "Teams Sheet Update");
+                          break;
+                      }
+                  }
+              }
+          }
+      }
+
+      function logGameAction(playerName, statType, changeValue, action) {
+        const logSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+        if (!logSheet) {
+          console.error("GameFeed sheet not found.");
+          return;
+        }
+
+        const timestamp = new Date();
+        const formattedTimestamp = Utilities.formatDate(timestamp, Session.getScriptTimeZone(), "yyyy/MM/dd HH:mm:ss");
+
+        // Prepend apostrophe to force string formatting
+        const safeChangeValue = `'${changeValue.toString()}`;
+        const safeAction = `'${action.toString()}`;
+
+        console.log("Logging action to GameFeed:", {
+          formattedTimestamp,
+          playerName,
+          statType,
+          safeChangeValue,
+          safeAction,
+        });
+
+        logSheet.appendRow([
+          formattedTimestamp,
+          playerName,
+          statType,
+          safeChangeValue,
+          safeAction,
+        ]);
+
+        const latestEntries = getLatestGameFeedEntries();
+        broadcastTickertapeUpdate(latestEntries);
+      }
+
+
+      // Function to handle edits in XP, Mana, Health sheet (IJKL -> EFGH)
+      function handleXpManaHealthSheetEdit(editedCell, sheet) {
+        const col = editedCell.getColumn();
+        const row = editedCell.getRow();
+        const value = editedCell.getValue();
+
+        if (!value || isNaN(value)) return; // Exit if no value or not a number
+
+        let targetCol;
+        if (col === 9) targetCol = 5;  // I -> E (XP)
+        else if (col === 10) targetCol = 6; // J -> F (Health)
+        else if (col === 11) targetCol = 7; // K -> G (Crystals)
+        else if (col === 12) targetCol = 8; // L -> H (GP)
+        else return; // Exit if column is not IJKL
+
+        const currentTotal = sheet.getRange(row, targetCol).getValue() || 0;
+        const playerClass = sheet.getRange(row, 2).getValue(); // Column B: Class
+        const playerLevel = sheet.getRange(row, 3).getValue(); // Column C: Level
+
+        let newTotal = currentTotal + value;
+
+        // Get dynamic max values based on class + level
+        const { maxHealth, maxCrystals } = getMaxValues(playerClass, playerLevel);
+
+        // Apply maximum limits for Health and Crystals only
+        if (targetCol === 6) newTotal = Math.min(newTotal, maxHealth);     // F column - Health
+        if (targetCol === 7) newTotal = Math.min(newTotal, maxCrystals);   // G column - Crystals
+
+        // Update the total and clear the input cell
+        sheet.getRange(row, targetCol).setValue(newTotal);
+        editedCell.setValue(""); // Clear the input cell after processing
+
+        // Log to GameFeed
+        const playerName = sheet.getRange(row, 1).getValue(); // Column A: Player Name
+        const statType = targetCol === 5 ? "XP" : targetCol === 6 ? "Health" : targetCol === 7 ? "Crystals" : "GP";
+        logGameAction(playerName, statType, value, "Manual Entry");
+
+        // Additional clearing logic for GP (Column L)
+        if (col === 12) {
+          sheet.getRange(row, col).setValue(""); // Redundant here but kept for safety
+        }
+      }
+
+
+
+
+
+      // Function to handle edits in the Teams sheet
+      function handleTeamsSheetEdit(editedCell, sheet) {
+        const row = editedCell.getRow();
+        const col = editedCell.getColumn();
+        const addedValue = editedCell.getValue();
+        const playerName = sheet.getRange(row, 2).getValue(); // Column B: Player Name
+
+        if (!addedValue || isNaN(addedValue)) return;
+
+        const xpSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+        const playerNames = xpSheet.getRange("A2:A100").getValues();
+
+        for (let i = 0; i < playerNames.length; i++) {
+          if (playerNames[i][0] === playerName) {
+            let targetCol, statType;
+
+            if (col === 10) { targetCol = 5; statType = "XP"; }
+            else if (col === 11) { targetCol = 6; statType = "Health"; }
+            else if (col === 12) { targetCol = 7; statType = "Crystals"; }
+            else if (col === 13) { targetCol = 8; statType = "GP"; }
+            else return;
+
+            const playerRow = i + 2;
+            const playerClass = xpSheet.getRange(playerRow, 2).getValue(); // Column B: Class
+            const playerLevel = xpSheet.getRange(playerRow, 3).getValue(); // Column C: Level
+            const currentTotal = xpSheet.getRange(playerRow, targetCol).getValue() || 0;
+
+            let newTotal = currentTotal + addedValue;
+
+            // Use dynamic max values if applying Health or Crystals
+            const { maxHealth, maxCrystals } = getMaxValues(playerClass, playerLevel);
+            if (targetCol === 6) newTotal = Math.min(newTotal, maxHealth);     // Health
+            if (targetCol === 7) newTotal = Math.min(newTotal, maxCrystals);   // Crystals
+
+            // Set the new value and clear the input cell
+            xpSheet.getRange(playerRow, targetCol).setValue(newTotal);
+            editedCell.setValue(""); // Clear the input on the Teams sheet
+
+            logGameAction(playerName, statType, addedValue, "Teams Sheet Update");
+            break;
+          }
+        }
+      }
+
+
+
+      function updatePlayerLevels() { 
+        const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+        const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+        const maxRows = sheet.getLastRow();
+
+        const baseXP = 1500; // XP per level
+        const maxLevels = { Mage: 34, Healer: 30, Guardian: 30 };
+        const gpBonus = 150;
+        const currentTime = new Date();
+
+        for (let row = 2; row <= maxRows; row++) {
+          const xp = parseInt(sheet.getRange(row, 5).getValue(), 10); // XP in column E
+          const characterClass = sheet.getRange(row, 2).getValue();
+          const currentLevel = parseInt(sheet.getRange(row, 3).getValue(), 10);
+          const playerName = sheet.getRange(row, 1).getValue();
+          const gpTotalCell = sheet.getRange(row, 8); // GP Total in column H
+
+          if (isNaN(xp) || !characterClass) continue;
+
+          let newLevel = Math.floor(xp / baseXP) + 1;
+          const maxLevel = maxLevels[characterClass] || 30;
+          newLevel = Math.min(newLevel, maxLevel);
+
+          // Optional: Get max values for logging or future logic
+          const { maxHealth, maxCrystals } = getMaxValues(characterClass, newLevel);
+
+          if (newLevel !== currentLevel) {
+            sheet.getRange(row, 3).setValue(newLevel);
+
+            const levelChange = newLevel - currentLevel;
+            const changeType = levelChange > 0 ? "Level Up" : "Level Down";
+
+            gameFeedSheet.appendRow([
+              Utilities.formatDate(currentTime, Session.getScriptTimeZone(), "yyyy/MM/dd HH:mm:ss"),
+              playerName,
+              "Level",
+              levelChange,
+              changeType
+            ]);
+
+            Logger.log(`Player level changed: ${playerName} is now level ${newLevel} (${changeType}).`);
+
+            if (levelChange > 0) {
+              const currentGP = parseInt(gpTotalCell.getValue(), 10) || 0;
+              const newGP = currentGP + gpBonus;
+              gpTotalCell.setValue(newGP);
+
+              gameFeedSheet.appendRow([
+                Utilities.formatDate(currentTime, Session.getScriptTimeZone(), "yyyy/MM/dd HH:mm:ss"),
+                playerName,
+                'GP',
+                gpBonus,
+                'Level Up Bonus'
+              ]);
+            }
+          }
+        }
+      }
+
+      function handleTeammateEffect(sheet, playerRow, effectType, powerName) { 
+        console.log(`🔄 handleTeammateEffect STARTED for power: ${powerName}, effectType: ${effectType}`);
+        const playerTeam = sheet.getRange(playerRow, 13).getValue(); // Column M: Team
+        const teamData = sheet.getRange("M2:M32").getValues(); // Team data for all players
+
+        teamData.forEach((team, index) => {
+          const teamRow = index + 2;
+          if (team[0] === playerTeam && teamRow !== playerRow) {
+            const teammateClass = sheet.getRange(teamRow, 2).getValue(); // Column B
+            const teammateLevel = parseInt(sheet.getRange(teamRow, 3).getValue(), 10); // Column C
+            const teammateName = sheet.getRange(teamRow, 1).getValue(); // Column A
+
+            const { maxHealth, maxCrystals } = getMaxValues(teammateClass, teammateLevel);
+
+            switch (effectType) {
+              case "addCrystals":
+                if (teammateClass === "Mage") {
+                  console.log(`Skipping ${teammateName} because they are a Mage`);
+                  return;
+                }
+
+                const currentCrystals = sheet.getRange(teamRow, 7).getValue() || 0; // Column G
+                const newCrystals = Math.min(currentCrystals + 2, maxCrystals);
+
+                sheet.getRange(teamRow, 7).setValue(newCrystals);
+                logGameAction(teammateName, "Crystals", newCrystals - currentCrystals, powerName);
+                break;
+
+              case "addHealth":
+                const currentHealth = sheet.getRange(teamRow, 6).getValue() || 0; // Column F
+                const newHealth = Math.min(currentHealth + 2, maxHealth);
+
+                sheet.getRange(teamRow, 6).setValue(newHealth);
+                logGameAction(teammateName, "Health", newHealth - currentHealth, powerName);
+                break;
+
+              case "fullHealth":
+                const currentFullHealth = sheet.getRange(teamRow, 6).getValue() || 0;
+                sheet.getRange(teamRow, 6).setValue(maxHealth);
+                logGameAction(teammateName, "Health", maxHealth - currentFullHealth, powerName);
+                break;
+
+              case "targetedHealth":
+                const selectedTeammateRow = promptForTeammateRow(sheet, playerTeam, playerRow);
+                if (selectedTeammateRow !== -1) {
+                  const targetedClass = sheet.getRange(selectedTeammateRow, 2).getValue();
+                  const targetedLevel = parseInt(sheet.getRange(selectedTeammateRow, 3).getValue(), 10);
+                  const targetedName = sheet.getRange(selectedTeammateRow, 1).getValue();
+
+                  const { maxHealth: targetedMaxHealth } = getMaxValues(targetedClass, targetedLevel);
+                  const targetedCurrentHealth = sheet.getRange(selectedTeammateRow, 6).getValue() || 0;
+                  const targetedNewHealth = Math.min(targetedCurrentHealth + 1, targetedMaxHealth);
+
+                  sheet.getRange(selectedTeammateRow, 6).setValue(targetedNewHealth);
+                  logGameAction(targetedName, "Health", targetedNewHealth - targetedCurrentHealth, powerName);
+                }
+                break;
+
+              default:
+                console.warn(`Unknown effect type: ${effectType}`);
+            }
+          }
+        });
+      }
+
+
+      function getTeammates() {
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Teams");
+          const data = sheet.getDataRange().getValues();
+
+          return data.map(row => ({
+              id: row[0], // Unique ID
+              name: row[1] // Name
+          }));
+      }
+      function getTeammatesForDropdown(uniqueId) {
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+          const playerRow = findPlayerRowById(sheet, uniqueId); // Locate the player by uniqueId
+
+          if (playerRow === -1) {
+              console.log("Player not found with uniqueId:", uniqueId);
+              return []; // Return empty if player not found
+          }
+
+          // Get the player's team (Column M)
+          const playerTeam = sheet.getRange(playerRow, 13).getValue(); // Column M: Team
+          console.log("Player's team found:", playerTeam);
+
+          // Fetch all relevant rows (Columns A-N)
+          const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 14).getValues();
+
+          // Filter teammates by the same team and exclude the current player
+          const teammates = data
+              .filter(row => row[12] === playerTeam && row[13] !== uniqueId) // Match team and exclude the current player
+              .map(row => ({
+                  id: row[13], // Unique ID (Column N)
+                  name: row[0], // Player Name (Column A)
+              }));
+
+          console.log("Filtered teammates for dropdown (names):", teammates);
+          return teammates;
+      }
+
+
+      function findPlayerRowById(sheet, uniqueId) {
+        try {
+          const data = sheet.getRange('N2:N32').getValues(); // Column N
+          Logger.log("🔎 Searching for Unique ID: " + uniqueId);
+
+          for (let i = 0; i < data.length; i++) {
+            const rowValue = data[i][0];
+            Logger.log(`Row ${i + 2}: value='${rowValue}'`);
+
+            if (rowValue && rowValue.toString().trim() === uniqueId.toString().trim()) {
+              Logger.log(`✅ Match found at row ${i + 2}`);
+              return i + 2;
+            }
+          }
+
+          Logger.log(`❌ No match found for Unique ID: '${uniqueId}'`);
+          return -1;
+        } catch (error) {
+          Logger.log(`❗ Error in findPlayerRowById: ${error.message}`);
+          return -1;
+        }
+      }
+
+
+      function getPlayerData(uniqueId) {
+        const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('XP, Mana, Health');
+        const playerRow = findPlayerRowById(sheet, uniqueId);
+        if (playerRow === -1) return null;
+
+        const data = sheet.getRange(playerRow, 1, 1, 13).getValues()[0];
+
+        const characterClass = data[1]; // Column B
+        const level = data[2];          // Column C
+        const gender = data[3];         // Column D
+        const imageUrl = getPlayerImage(characterClass, level, gender);
+
+        // Get max health and crystals based on class + level
+        const { maxHealth, maxCrystals } = getMaxValues(characterClass, level);
+
+        return {
+          playerName: data[0],          // Column A
+          characterClass: characterClass,
+          level: level,
+          xp: data[4],                  // Column E
+          health: data[5],              // Column F
+          crystals: data[6],            // Column G
+          goldPieces: data[7],          // Column H
+          team: data[12],               // Column M
+          imageUrl: imageUrl,           // Player image
+          maxHealth: maxHealth,         // ✅ New
+          maxCrystals: maxCrystals      // ✅ New
+        };
+      }
+
+
+      function getPlayerImage(className, level, gender) {
+        const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Vlookup Sheet');
+        if (!sheet) return 'https://example.com/default.jpg'; // Fallback image URL
+        
+        const data = sheet.getDataRange().getValues();
+        let closestImageUrl = 'https://example.com/default.jpg'; // Default fallback image
+        let closestLevel = -1; // To store the closest lower level match
+
+        // Search for a matching or closest lower-level image in the lookup table
+        for (let i = 1; i < data.length; i++) { // Skip the header row
+          const [lookupClass, lookupLevel, lookupGender, imageUrl] = data[i];
+          const parsedLevel = parseInt(lookupLevel);
+
+          if (
+            lookupClass === className &&
+            lookupGender === gender &&
+            parsedLevel <= level && // Check for levels less than or equal to the current level
+            parsedLevel > closestLevel // Ensure it's the closest lower level
+          ) {
+            closestLevel = parsedLevel; // Update the closest level
+            closestImageUrl = imageUrl; // Update the image URL
+          }
+        }
+
+        return closestImageUrl; // Return the closest matching image URL
+      }
+
+
+      // Helper to apply stat changes and log them
+      function addPetFeedPoint(uniqueId) {
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('XP, Mana, Health');
+          const logSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(LOG_SHEET_NAME);
+          const playerRow = findPlayerRowById(sheet, uniqueId);
+
+          if (playerRow === -1) {
+              return "Unique ID not found."; // Player not found
+          }
+
+          const gpClearingCell = sheet.getRange(playerRow, 12); // Column L (Clearing House)
+          const gpTotalCell = sheet.getRange(playerRow, 8);     // Column H (Totals)
+          const lastFeedCell = sheet.getRange(playerRow, 15);   // Column O (Last Feed Date)
+          const playerName = sheet.getRange(playerRow, 1).getValue();
+
+          const currentGP = gpTotalCell.getValue() || 0;  // Current total GP
+          const addedGP = 10;                             // GP to add
+          const currentDate = formatDate(new Date());     // Format today's date as "DD/MM/YYYY"
+          let lastFeedDate = lastFeedCell.getValue();
+
+          // Ensure lastFeedDate is a string in the correct format
+          if (lastFeedDate instanceof Date) {
+              lastFeedDate = formatDate(lastFeedDate);
+          } else if (!lastFeedDate || typeof lastFeedDate !== 'string') {
+              console.warn(`Unexpected value in lastFeedDate: ${lastFeedDate}`);
+              lastFeedDate = "01/01/1900"; // Default very old date to allow feeding
+          }
+
+          // Check if the player has already fed their pet today
+          if (lastFeedDate === currentDate) {
+              return "You have already fed your pet today!";
+          }
+
+          // Log the current date before writing to the sheet
+          console.log(`Writing current date (${currentDate}) for player ${playerName}`);
+
+          // Allow feeding: Add 10 GP, update totals, and mark today's date
+          gpClearingCell.setValue(addedGP);                       // Add 10 GP to clearing house (L)
+          gpTotalCell.setValue(currentGP + addedGP);              // Update total in column H
+          gpClearingCell.setValue("");                            // Clear column L
+          lastFeedCell.setValue(currentDate);                     // Mark today's feed date
+
+          // Log the action
+          logGameAction(playerName, "GP", addedGP, "Feed Pet");
+
+          // Send success message in plain text for modal display
+          return "Yum! Your pet is fed and happy!";
+      }
+
+
+      // Helper function to format dates as "DD/MM/YYYY"
+      function formatDate(date) {
+          const day = String(date.getDate()).padStart(2, '0');  // Add leading zero
+          const month = String(date.getMonth() + 1).padStart(2, '0');  // Month is 0-indexed
+          const year = date.getFullYear();
+          return `${day}/${month}/${year}`;
+      }
+
+
+
+
+      // Function to get the pet feed image URL (cycling every 20 days)
+      function getPetImage() {
+        const lookupSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(PET_IMAGE_SHEET_NAME);
+        if (!lookupSheet) return 'https://example.com/default.jpg'; // Fallback image URL
+
+        const today = new Date();
+        const dayOfYear = Math.floor((today - new Date(today.getFullYear(), 0, 0)) / 86400000); // Days since Jan 1
+        const imageListLength = PET_IMAGE_CYCLE_END - PET_IMAGE_CYCLE_START + 1; // Total images in the list
+        const blockCycle = Math.floor(dayOfYear / 20) % imageListLength; // Calculate the image block (20 days per image)
+        
+        const imageRow = PET_IMAGE_CYCLE_START + blockCycle; // Row for the current image
+        return lookupSheet.getRange(imageRow, 3).getValue(); // Column C contains the image URL
+      }
+
+
+      // Modal Pop-up Function
+      function showModal(message) {
+        const htmlOutput = HtmlService.createHtmlOutput(
+          `<div style="font-size: 20px; text-align: center; padding: 20px;">${message}</div>`
+        )
+          .setWidth(300)
+          .setHeight(100);
+        SpreadsheetApp.getUi().showModalDialog(htmlOutput, 'Notification');
+      }
+
+      // Function to add 0.5 Crystals daily up to class caps
+      function addDailyCrystals() {
+        const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('XP, Mana, Health');
+        const data = sheet.getRange('A2:G32').getValues(); // Includes Player Name, Class, Level, ..., Crystals
+
+        for (let i = 0; i < data.length; i++) {
+          const [playerName, playerClass, level, , , , currentCrystals] = data[i]; // A-G
+
+          if (!playerClass || isNaN(level)) continue;
+
+          const { maxCrystals } = getMaxValues(playerClass, level);
+          const row = i + 2;
+
+          if (currentCrystals < maxCrystals) {
+            const newCrystals = Math.min(currentCrystals + 0.5, maxCrystals);
+            sheet.getRange(row, 7).setValue(newCrystals); // Column G
+            logGameAction(playerName, "Crystals", newCrystals - currentCrystals, "Daily Crystal Bonus");
+          }
+        }
+      }
+
+      function activatePower(uniqueId, powerName, crystalChange, healthChange, xpChange, teammateEffect = null) {
+          console.log("ActivatePower function called with effect type:", teammateEffect);
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+          const row = findPlayerRowById(sheet, uniqueId); // Find the row of the player
+          if (row === -1) return `Player not found.`;
+
+          const playerName = sheet.getRange(row, 1).getValue(); // Column A
+          const playerClass = sheet.getRange(row, 2).getValue(); // Column B
+          const playerLevel = sheet.getRange(row, 3).getValue(); // Column C
+          const { maxHealth, maxCrystals } = getMaxValues(playerClass, playerLevel);
+
+          // Crystals Update
+          if (crystalChange) {
+              const currentCrystals = sheet.getRange(row, 7).getValue() || 0; // Column G
+              const newCrystals = Math.min(currentCrystals + crystalChange, maxCrystals);
+              const crystalDifference = newCrystals - currentCrystals;
+              sheet.getRange(row, 7).setValue(newCrystals);
+              logGameAction(playerName, "Crystals", (crystalDifference >= 0 ? "+" : "") + crystalDifference, powerName);
+          }
+
+          // Health Update for Self
+          if (healthChange) {
+              const currentHealth = sheet.getRange(row, 6).getValue() || 0; // Column F
+              const newHealth = Math.min(currentHealth + healthChange, maxHealth);
+              const healthDifference = newHealth - currentHealth;
+              sheet.getRange(row, 6).setValue(newHealth);
+              logGameAction(playerName, "Health", (healthDifference >= 0 ? "+" : "") + healthDifference, powerName);
+          }
+
+          // Team Effects
+          if (teammateEffect) {
+              console.log(`Applying teammate effect: ${teammateEffect}`);
+              const playerTeam = sheet.getRange(row, 13).getValue(); // Column M
+              const teamData = sheet.getRange("M2:M32").getValues(); // All team data
+
+              teamData.forEach((team, index) => {
+                  const teamRow = index + 2;
+                  if (team[0] === playerTeam && teamRow !== row) {
+                      const teammateClass = sheet.getRange(teamRow, 2).getValue(); // Column B
+                      const teammateLevel = sheet.getRange(teamRow, 3).getValue(); // Column C
+                      const teammateName = sheet.getRange(teamRow, 1).getValue(); // Column A
+                      const { maxHealth: teammateMaxHealth, maxCrystals: teammateMaxCrystals } = getMaxValues(teammateClass, teammateLevel);
+
+                      if (teammateEffect === "addHealth") {
+                          const currentHealth = sheet.getRange(teamRow, 6).getValue() || 0; // Column F
+                          const newHealth = Math.min(currentHealth + 2, teammateMaxHealth);
+                          const healthDiff = newHealth - currentHealth;
+                          sheet.getRange(teamRow, 6).setValue(newHealth);
+                          logGameAction(teammateName, "Health", (healthDiff >= 0 ? "+" : "") + healthDiff, powerName);
+                      }
+
+                      else if (teammateEffect === "addCrystals") {
+                          console.log(`Checking teammate: ${teammateName}, Class: ${teammateClass}`);
+                          if (teammateClass === "Mage") {
+                              console.log(`Skipping ${teammateName} because they are a Mage`);
+                              return;
+                          }
+
+                          const currentCrystals = sheet.getRange(teamRow, 7).getValue() || 0; // Column G
+                          const newCrystals = Math.min(currentCrystals + 2, teammateMaxCrystals);
+                          const crystalDiff = newCrystals - currentCrystals;
+                          sheet.getRange(teamRow, 7).setValue(newCrystals);
+                          logGameAction(teammateName, "Crystals", (crystalDiff >= 0 ? "+" : "") + crystalDiff, powerName);
+                      }
+                  }
+              });
+          }
+
+          // XP Update
+          if (xpChange) {
+              const currentXP = sheet.getRange(row, 5).getValue() || 0; // Column E
+              const xpDiff = xpChange;
+              sheet.getRange(row, 5).setValue(currentXP + xpChange);
+              logGameAction(playerName, "XP", (xpDiff >= 0 ? "+" : "") + xpDiff, powerName);
+          }
+
+          return `${powerName} Activated!`;
+      }
+
+
+      // Specific Universal Powers
+      function useInvisibilityButton(uniqueId) {
+          const result = activatePower(uniqueId, "Invisibility", -1, null, null);
+          return result;
+      }
+
+      function useForageButton(uniqueId) {
+          const result = activatePower(uniqueId, "Forage", -1, null, null);
+          return result;
+      }
+
+      function useSainthoodButton(uniqueId) {
+          const result = activatePower(uniqueId, "Sainthood", -2, null, null);
+          return result;
+      }
+
+
+
+      // Specific Power Functions
+      // Healer Power: Heal 1
+      function useHeal1Button(uniqueId) {
+          return activatePower(uniqueId, "Heal 1", -2, 2, null, "addHealth");
+          // Cost: -2 Crystals, +2 Health for the Player, and +2 Health for teammates
+      }
+
+      // Healer Power: Respite
+      function useRespiteButton(uniqueId) {
+          return activatePower(uniqueId, "Respite", -2, null, null); // -2 Crystals, No other changes
+      }
+
+      // Healer Power: Ardent Faith
+      function useArdentFaithButton(uniqueId) {
+          return activatePower(uniqueId, "Ardent Faith", -2, null, 100); // -2 Crystals, +100 XP
+      }
+
+      // Healer Power: Revive
+      function useReviveButton(playerId, teammateId) {
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+          const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed"); // Access GameFeed sheet
+
+          // Find player and teammate rows
+          const playerRow = findPlayerRowById(sheet, playerId);
+          const teammateRow = findPlayerRowById(sheet, teammateId);
+
+          if (playerRow === -1 || teammateRow === -1) {
+              return `Error: Invalid player or teammate ID.`;
+          }
+
+          const playerName = sheet.getRange(playerRow, 1).getValue(); // Column A: Player Name
+          const teammateName = sheet.getRange(teammateRow, 1).getValue(); // Column A: Teammate Name
+
+          // Check teammate's health
+          const healthCell = sheet.getRange(teammateRow, 6); // Column F: Health
+          const currentHealth = healthCell.getValue() || 0;
+
+          if (currentHealth > 0) {
+              return `${teammateName} is not at 0 or negative health and cannot be revived. No crystals were used.`;
+          }
+
+          // Deduct Crystals
+          const crystalsCell = sheet.getRange(playerRow, 7); // Column G: Crystals
+          const currentCrystals = crystalsCell.getValue() || 0;
+          if (currentCrystals < 2) {
+              return `Not enough crystals to use Revive.`;
+          }
+          crystalsCell.setValue(currentCrystals - 2);
+          logGameAction(playerName, "Crystals", -2, "Revive");
+
+          // Add XP to healer
+          const xpCell = sheet.getRange(playerRow, 5); // Column E: XP
+          const currentXP = xpCell.getValue() || 0;
+          xpCell.setValue(currentXP + 150); // Add 150 XP
+          logGameAction(playerName, "XP", 150, "Revive");
+
+          // Revive teammate by setting health to 1
+          healthCell.setValue(1); // Set to 1 heart
+          logGameAction(teammateName, "Health", 1 - currentHealth, "Revive");
+
+          // Log specific message to GameFeed
+          const timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy/MM/dd HH:mm:ss");
+      gameFeedSheet.appendRow([timestamp, playerName, "Revive", `Revived ${teammateName} and set to 1 heart`]);
+
+          return `${teammateName} has been revived with 1 heart! You earned 150 XP and used 2 Crystals.`;
+      }
+
+
+      // Healer Power: Favour of the Gods
+      function useFavourOfTheGodsButton(uniqueId) {
+          return activatePower(uniqueId, "Favour of the Gods", -2, null, null); // -2 Crystals, No other changes
+      }
+
+      function useHeal2Button(playerId, teammateId) {
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+          const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+          
+          const playerRow = findPlayerRowById(sheet, playerId);
+          const teammateRow = teammateId && teammateId !== "self" ? findPlayerRowById(sheet, teammateId) : playerRow;
+
+          if (playerRow === -1 || teammateRow === -1) {
+              return `Error: Invalid player or teammate ID.`;
+          }
+
+          const playerName = sheet.getRange(playerRow, 1).getValue(); // Column A
+          const teammateName = sheet.getRange(teammateRow, 1).getValue(); // Column A
+
+          // Deduct Crystals from the player
+          const crystalsCell = sheet.getRange(playerRow, 7); // Column G
+          const currentCrystals = crystalsCell.getValue() || 0;
+
+          if (currentCrystals < 2) {
+              return `Not enough crystals to use Heal 2.`;
+          }
+
+          crystalsCell.setValue(currentCrystals - 2);
+          logGameAction(playerName, "Crystals", -2, "Heal 2");
+
+          // Add XP to the player
+          const xpCell = sheet.getRange(playerRow, 5); // Column E
+          const currentXP = xpCell.getValue() || 0;
+          xpCell.setValue(currentXP + 100);
+          logGameAction(playerName, "XP", 100, "Heal 2");
+
+          // Add Health to the teammate
+          const healthCell = sheet.getRange(teammateRow, 6); // Column F
+          const currentHealth = healthCell.getValue() || 0;
+
+          const teammateClass = sheet.getRange(teammateRow, 2).getValue(); // Column B
+          const teammateLevel = sheet.getRange(teammateRow, 3).getValue(); // Column C
+          const { maxHealth } = getMaxValues(teammateClass, teammateLevel);
+
+          const newHealth = Math.min(currentHealth + 5, maxHealth);
+          const healthAdded = newHealth - currentHealth;
+
+          healthCell.setValue(newHealth);
+          logGameAction(teammateName, "Health", healthAdded, "Heal 2");
+
+          return `Healed ${teammateName} by ${healthAdded} hearts. You earned 100 XP and used 2 Crystals.`;
+      }
+
+      // Healer Power: Healing Circle
+      function useHealingCircleButton(uniqueId) {
+          return activatePower(uniqueId, "Healing Circle", -3, null, 200, "addHealth"); // -3 Crystals, Team +3 Health, +200 XP
+      }
+
+      function useHeal3Button(playerId, teammateId) {
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+
+          const playerRow = findPlayerRowById(sheet, playerId);
+          const teammateRow = teammateId !== "self" ? findPlayerRowById(sheet, teammateId) : playerRow;
+
+          if (playerRow === -1 || teammateRow === -1) {
+              return `Error: Invalid player or teammate ID.`;
+          }
+
+          const playerName = sheet.getRange(playerRow, 1).getValue();
+          const teammateName = sheet.getRange(teammateRow, 1).getValue();
+
+          // Deduct Crystals
+          const crystalsCell = sheet.getRange(playerRow, 7);
+          const currentCrystals = crystalsCell.getValue() || 0;
+          if (currentCrystals < 3) {
+              return `Not enough crystals to use Heal 3.`;
+          }
+          crystalsCell.setValue(currentCrystals - 3);
+          logGameAction(playerName, "Crystals", -3, "Heal 3");
+
+          // Add XP
+          const xpCell = sheet.getRange(playerRow, 5);
+          const currentXP = xpCell.getValue() || 0;
+          xpCell.setValue(currentXP + 250);
+          logGameAction(playerName, "XP", 250, "Heal 3");
+
+          // Heal Teammate Fully
+          const healthCell = sheet.getRange(teammateRow, 6);
+          const currentHealth = healthCell.getValue() || 0;
+
+          const teammateClass = sheet.getRange(teammateRow, 2).getValue();
+          const teammateLevel = sheet.getRange(teammateRow, 3).getValue();
+          const { maxHealth } = getMaxValues(teammateClass, teammateLevel);
+
+          const healthAdded = maxHealth - currentHealth;
+
+          if (healthAdded > 0) {
+              healthCell.setValue(maxHealth);
+              logGameAction(teammateName, "Health", healthAdded, "Heal 3");
+              return `${teammateName} has been fully healed! You gained 250 XP and used 3 Crystals.`;
+          } else {
+              return `${teammateName} already has full health.`;
+          }
+      }
+
+
+      // Server-side function for applying full health to teammate
+      function applyFullHealth(playerId, teammateId, powerName, crystalCost, xpReward) {
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+          const playerRow = findPlayerRowById(sheet, playerId);
+          const teammateRow = teammateId === "self" ? playerRow : findPlayerRowById(sheet, teammateId);
+
+          if (playerRow === -1 || teammateRow === -1) return `Invalid player or teammate ID.`;
+
+          const playerName = sheet.getRange(playerRow, 1).getValue();
+          const teammateName = sheet.getRange(teammateRow, 1).getValue();
+
+          // Deduct crystals
+          const crystalsCell = sheet.getRange(playerRow, 7);
+          const currentCrystals = crystalsCell.getValue() || 0;
+
+          if (currentCrystals < crystalCost) {
+              return `${playerName}, you don't have enough crystals for ${powerName}.`;
+          }
+          crystalsCell.setValue(currentCrystals - crystalCost);
+          logGameAction(playerName, "Crystals", -crystalCost, powerName);
+
+          // Add XP
+          const xpCell = sheet.getRange(playerRow, 5);
+          const currentXP = xpCell.getValue() || 0;
+          xpCell.setValue(currentXP + xpReward);
+          logGameAction(playerName, "XP", xpReward, powerName);
+
+          // Full Heal
+          const teammateClass = sheet.getRange(teammateRow, 2).getValue();
+          const teammateLevel = sheet.getRange(teammateRow, 3).getValue();
+          const { maxHealth } = getMaxValues(teammateClass, teammateLevel);
+
+          const healthCell = sheet.getRange(teammateRow, 6);
+          const currentHealth = healthCell.getValue() || 0;
+          const healthAdded = maxHealth - currentHealth;
+
+      if (healthAdded > 0) {
+          healthCell.setValue(maxHealth);
+          logGameAction(teammateName, "Health", healthAdded, powerName);
+      } else {
+          return `${teammateName} already has full health. No crystals were refunded.`;
+      }
+
+
+
+
+      // Healer Power: Prayer
+      function usePrayerButton(uniqueId) {
+          return activatePower(uniqueId, "Prayer", -4, null, null); // -4 Crystals, No direct changes (manual effect)
+      }
+
+      function useGuard1Button(playerId, teammateId) {
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+
+          const playerRow = findPlayerRowById(sheet, playerId);
+          const teammateRow = teammateId !== "self" ? findPlayerRowById(sheet, teammateId) : playerRow;
+
+          if (playerRow === -1 || teammateRow === -1) {
+              return `Error: Invalid player or teammate ID.`;
+          }
+
+          const playerName = sheet.getRange(playerRow, 1).getValue();
+          const teammateName = sheet.getRange(teammateRow, 1).getValue();
+
+          // Deduct 1 crystal
+          const crystalsCell = sheet.getRange(playerRow, 7);
+          const currentCrystals = crystalsCell.getValue() || 0;
+          if (currentCrystals < 1) return `Not enough crystals to use Guard 1.`;
+          crystalsCell.setValue(currentCrystals - 1);
+          logGameAction(playerName, "Crystals", -1, "Guard 1");
+
+          // Subtract 2 health from Guardian
+          const guardianHealthCell = sheet.getRange(playerRow, 6);
+          const currentGuardianHealth = guardianHealthCell.getValue() || 0;
+          guardianHealthCell.setValue(currentGuardianHealth - 2);
+          logGameAction(playerName, "Health", -2, "Guard 1");
+
+          // Add 50 XP to Guardian
+          const xpCell = sheet.getRange(playerRow, 5);
+          const currentXP = xpCell.getValue() || 0;
+          xpCell.setValue(currentXP + 50);
+          logGameAction(playerName, "XP", 50, "Guard 1");
+
+          // Add 1 health to teammate
+          const teammateClass = sheet.getRange(teammateRow, 2).getValue();
+          const teammateLevel = sheet.getRange(teammateRow, 3).getValue();
+          const { maxHealth } = getMaxValues(teammateClass, teammateLevel);
+
+          const teammateHealthCell = sheet.getRange(teammateRow, 6);
+          const currentTeammateHealth = teammateHealthCell.getValue() || 0;
+          const newTeammateHealth = Math.min(currentTeammateHealth + 1, maxHealth);
+          teammateHealthCell.setValue(newTeammateHealth);
+
+          logGameAction(teammateName, "Health", newTeammateHealth - currentTeammateHealth, "Guard 1");
+
+          return `${teammateName} was protected and gained 1 heart! ${playerName} lost 2 hearts, used 1 Crystal, and gained 50 XP.`;
+      }
+
+
+
+
+      function useFrontalAssaultButton(uniqueId) {
+        return activatePower(uniqueId, "Frontal Assault", -2, null, null);
+        // Cost: 2 Crystals, No other stat change
+      }
+
+      function useFirstAidButton(uniqueId) { 
+        return activatePower(uniqueId, "First Aid", -2, 2, 10); 
+        // Cost: 2 Crystals, Player adds +2 Health (column F = 6)
+      }
+
+      function useCounterAttackButton(uniqueId) {
+        return activatePower(uniqueId, "Counter Attack", -3, null, null);
+        // Cost: 3 Crystals, No other stat change
+      }
+
+      function useGuard2Button(playerId, teammateId) {
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+
+          const playerRow = findPlayerRowById(sheet, playerId);
+          const teammateRow = teammateId !== "self" ? findPlayerRowById(sheet, teammateId) : playerRow;
+
+          if (playerRow === -1 || teammateRow === -1) {
+              return `Error: Invalid player or teammate ID.`;
+          }
+
+          const playerName = sheet.getRange(playerRow, 1).getValue();
+          const teammateName = sheet.getRange(teammateRow, 1).getValue();
+
+          // Deduct 2 crystals
+          const crystalsCell = sheet.getRange(playerRow, 7);
+          const currentCrystals = crystalsCell.getValue() || 0;
+          if (currentCrystals < 2) return `Not enough crystals to use Guard 2.`;
+          crystalsCell.setValue(currentCrystals - 2);
+          logGameAction(playerName, "Crystals", -2, "Guard 2");
+
+          // Add 100 XP to Guardian
+          const xpCell = sheet.getRange(playerRow, 5);
+          const currentXP = xpCell.getValue() || 0;
+          xpCell.setValue(currentXP + 100);
+          logGameAction(playerName, "XP", 100, "Guard 2");
+
+          // Add 3 health to teammate
+          const teammateClass = sheet.getRange(teammateRow, 2).getValue();
+          const teammateLevel = sheet.getRange(teammateRow, 3).getValue();
+          const { maxHealth } = getMaxValues(teammateClass, teammateLevel);
+
+          const teammateHealthCell = sheet.getRange(teammateRow, 6);
+          const currentTeammateHealth = teammateHealthCell.getValue() || 0;
+          const newTeammateHealth = Math.min(currentTeammateHealth + 3, maxHealth);
+          teammateHealthCell.setValue(newTeammateHealth);
+
+          logGameAction(teammateName, "Health", newTeammateHealth - currentTeammateHealth, "Guard 2");
+
+          return `${teammateName} was protected and gained 3 hearts! ${playerName} used 2 Crystals and gained 100 XP.`;
+      }
+
+
+
+      function useFrontalAssault2Button(uniqueId) {
+        return activatePower(uniqueId, "Frontal Assault 2", -4, 5, 200);
+        // Cost: 4 Crystals, Player gains +200 XP (column E = 5)
+      }
+
+      function useDefenseOfTheCastleButton(uniqueId) {
+        return activatePower(uniqueId, "Defense of the Castle", -4, null, null);
+        // Cost: 4 Crystals, No other stat change
+      }
+
+      function useGuardAllButton(playerId) {
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+
+          const playerRow = findPlayerRowById(sheet, playerId);
+          if (playerRow === -1) return `Error: Invalid player ID.`;
+
+          const playerName = sheet.getRange(playerRow, 1).getValue();
+          const playerTeam = sheet.getRange(playerRow, 13).getValue(); // Column M
+
+          // Deduct 3 crystals
+          const crystalsCell = sheet.getRange(playerRow, 7); // Column G
+          const currentCrystals = crystalsCell.getValue() || 0;
+          if (currentCrystals < 3) return `Not enough crystals to use Guard All.`;
+          crystalsCell.setValue(currentCrystals - 3);
+          logGameAction(playerName, "Crystals", -3, "Guard All");
+
+          // Subtract 5 hearts from Guardian (cap at 0)
+          const guardianHealthCell = sheet.getRange(playerRow, 6); // Column F
+          const currentGuardianHealth = guardianHealthCell.getValue() || 0;
+          const guardianNewHealth = Math.max(0, currentGuardianHealth - 5);
+          guardianHealthCell.setValue(guardianNewHealth);
+          logGameAction(playerName, "Health", guardianNewHealth - currentGuardianHealth, "Guard All");
+
+          // Add 200 XP
+          const xpCell = sheet.getRange(playerRow, 5); // Column E
+          const currentXP = xpCell.getValue() || 0;
+          xpCell.setValue(currentXP + 200);
+          logGameAction(playerName, "XP", 200, "Guard All");
+
+          // Add 3 hearts to all teammates (using dynamic caps)
+          const teamData = sheet.getRange("M2:M32").getValues(); // Team column
+          teamData.forEach((team, index) => {
+              const teamRow = index + 2;
+              if (team[0] === playerTeam && teamRow !== playerRow) {
+                  const teammateName = sheet.getRange(teamRow, 1).getValue(); // Column A
+                  const teammateClass = sheet.getRange(teamRow, 2).getValue(); // Column B
+                  const teammateLevel = sheet.getRange(teamRow, 3).getValue(); // Column C
+
+                  const { maxHealth } = getMaxValues(teammateClass, teammateLevel);
+
+                  const healthCell = sheet.getRange(teamRow, 6); // Column F
+                  const currentHealth = healthCell.getValue() || 0;
+                  const newHealth = Math.min(currentHealth + 3, maxHealth);
+                  const healthAdded = newHealth - currentHealth;
+
+                  if (healthAdded > 0) {
+                      healthCell.setValue(newHealth);
+                      logGameAction(teammateName, "Health", healthAdded, "Guard All");
+                  }
+              }
+          });
+
+          return `${playerName} protected the team! All teammates gained up to 3 hearts. You lost 5 hearts, used 3 Crystals, and gained 200 XP.`;
+      }
+
+
+
+
+      function useSecretWeaponButton(uniqueId) {
+        return activatePower(uniqueId, "Secret Weapon", -4, null, null);
+        // Cost: 4 Crystals, No other stat change
+      }
+
+      // Mage Powers
+      function useCrystalTransferButton(uniqueId) {
+          return activatePower(uniqueId, "Crystal Transfer", -3, null, 100, "addCrystals");
+          // Subtract 3 Crystals, Add 100 XP to Activator, +1 Crystal to All Teammates
+      }
+
+
+      function useGenerosityAndSacrifice(uniqueId) {
+        return activatePower(uniqueId, "Generosity and Sacrifice", -2, null, null);
+        // Cost: 2 Crystals, No other stat change
+      }
+
+      function useTheCall(uniqueId) {
+        return activatePower(uniqueId, "The Call", -2, null, null);
+        // Cost: 2 Crystals, No other stat change
+      }
+
+      function useTeleport(uniqueId) {
+        return activatePower(uniqueId, "Teleport", -2, null, null);
+        // Cost: 2 Crystals, No other stat change
+      }
+
+      function useManaShield(uniqueId) {
+        return activatePower(uniqueId, "Mana Shield", -2, null, null);
+        // Cost: 2 Crystals, No other stat change
+      }
+
+      function useClairvoyance(uniqueId) {
+        return activatePower(uniqueId, "Clairvoyance", -3, null, null);
+        // Cost: 3 Crystals, No other stat change
+      }
+
+      function useCheatDeath(uniqueId) {
+        return activatePower(uniqueId, "Cheat Death", -2, null, null);
+        // Cost: 2 Crystals, No other stat change
+      }
+
+      function useTimeWarp(uniqueId) {
+        return activatePower(uniqueId, "Time Warp", -3, null, null);
+        // Cost: 3 Crystals, No other stat change
+      }
+
+      function useCrystalManaFountain(uniqueId) {
+        return activatePower(uniqueId, "Crystal Mana Fountain", -4, 5, 200, 1);
+        // Cost: 4 Crystals, Player gains +200 XP, Teammates gain +1 Crystal
+      }
+
+      function useMageCircle(uniqueId) {
+        return activatePower(uniqueId, "Mage Circle", -4, null, null);
+        // Cost: 4 Crystals, No other stat change
+      }
+
+      function promptForTeammateRow(sheet, playerTeam, playerRow) {
+          const teamData = sheet.getRange("M2:M32").getValues();
+          const teammateOptions = [];
+
+          teamData.forEach((team, index) => {
+              if (team[0] === playerTeam && index + 2 !== playerRow) { // Exclude the activating player
+                  const playerName = sheet.getRange(index + 2, 1).getValue(); // Column A: Player Name
+                  teammateOptions.push({ row: index + 2, name: playerName });
+              }
+          });
+
+          if (teammateOptions.length === 0) return -1; // No teammates found
+
+          const teammateNames = teammateOptions.map(teammate => teammate.name).join(", ");
+          const selectedTeammateName = Browser.inputBox(`Choose a teammate: ${teammateNames}`);
+
+          const selectedTeammate = teammateOptions.find(teammate => teammate.name === selectedTeammateName);
+          return selectedTeammate ? selectedTeammate.row : -1;
+      }
+
+      function useTinkerer(uniqueId) {
+          try {
+              console.log(`useTinkerer called with Unique ID: ${uniqueId}`);
+              const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+              const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+              const playerRow = findPlayerRowById(sheet, uniqueId);
+
+              if (playerRow === -1) {
+                  console.error(`Player not found for Unique ID: ${uniqueId}`);
+                  return "Player not found.";
+              }
+
+              const playerName = sheet.getRange(playerRow, 1).getValue(); // Column A: Player Name
+              const gpTotalCell = sheet.getRange(playerRow, 8); // Column H: GP totals
+              const gpClearingCell = sheet.getRange(playerRow, 12); // Column L: GP clearing house
+              const currentGP = gpTotalCell.getValue() || 0;
+
+              const cost = 900; // Cost of Tinkerer
+              if (currentGP < cost) {
+                  console.log(`Insufficient GP for Tinkerer. Current GP: ${currentGP}`);
+                  
+                  // Log insufficient GP attempt
+                  gameFeedSheet.appendRow([new Date(), playerName, "GP", 0, "Tinkerer (Insufficient GP)"]);
+                  return `You don't have enough GP for Tinkerer.`;
+              }
+
+              // Deduct GP
+              gpClearingCell.setValue(-cost); // Subtract GP in clearing house
+              gpTotalCell.setValue(currentGP - cost); // Update GP total
+              gpClearingCell.setValue(""); // Clear clearing house after processing
+
+              console.log(`Tinkerer Activated for Player with Unique ID: ${uniqueId}`);
+              
+              // Log successful purchase
+              gameFeedSheet.appendRow([new Date(), playerName, "GP", -cost, "Tinkerer"]);
+              return `Tinkerer Activated!`;
+          } catch (error) {
+              console.error(`Error in useTinkerer: ${error.message}`, error.stack);
+              return "An error occurred while activating Tinkerer.";
+          }
+      }
+      function usePlanner(uniqueId) {
+          try {
+              console.log(`usePlanner called with Unique ID: ${uniqueId}`);
+              const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+              const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+              const playerRow = findPlayerRowById(sheet, uniqueId);
+
+              if (playerRow === -1) {
+                  console.error(`Player not found for Unique ID: ${uniqueId}`);
+                  return "Player not found.";
+              }
+
+              const playerName = sheet.getRange(playerRow, 1).getValue(); // Column A: Player Name
+              const gpTotalCell = sheet.getRange(playerRow, 8); // Column H: GP totals
+              const gpClearingCell = sheet.getRange(playerRow, 12); // Column L: GP clearing house
+              const currentGP = gpTotalCell.getValue() || 0;
+
+              const cost = 500; // Cost of The Planner
+              if (currentGP < cost) {
+                  console.log(`Insufficient GP for The Planner. Current GP: ${currentGP}`);
+                  
+                  // Log insufficient GP attempt
+                  gameFeedSheet.appendRow([new Date(), playerName, "GP", 0, "The Planner (Insufficient GP)"]);
+                  return `You don't have enough GP for The Planner.`;
+              }
+
+              // Deduct GP
+              gpClearingCell.setValue(-cost); // Subtract GP in clearing house
+              gpTotalCell.setValue(currentGP - cost); // Update GP total
+              gpClearingCell.setValue(""); // Clear clearing house after processing
+
+              console.log(`The Planner Activated for Player with Unique ID: ${uniqueId}`);
+              
+              // Log successful purchase
+              gameFeedSheet.appendRow([new Date(), playerName, "GP", -cost, "The Planner"]);
+              return `The Planner Activated!`;
+          } catch (error) {
+              console.error(`Error in usePlanner: ${error.message}`, error.stack);
+              return "An error occurred while activating The Planner.";
+          }
+      }
+      function useDeal(uniqueId) {
+          try {
+              console.log(`useDeal called with Unique ID: ${uniqueId}`);
+              const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+              const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+              const playerRow = findPlayerRowById(sheet, uniqueId);
+
+              if (playerRow === -1) {
+                  console.error(`Player not found for Unique ID: ${uniqueId}`);
+                  return "Player not found.";
+              }
+
+              const playerName = sheet.getRange(playerRow, 1).getValue(); // Column A: Player Name
+              const gpTotalCell = sheet.getRange(playerRow, 8); // Column H: GP totals
+              const gpClearingCell = sheet.getRange(playerRow, 12); // Column L: GP clearing house
+              const currentGP = gpTotalCell.getValue() || 0;
+
+              const cost = 600; // Cost of Deal
+              if (currentGP < cost) {
+                  console.log(`Insufficient GP for Deal. Current GP: ${currentGP}`);
+                  
+                  // Log insufficient GP attempt
+                  gameFeedSheet.appendRow([new Date(), playerName, "GP", 0, "Deal (Insufficient GP)"]);
+                  return `You don't have enough GP for Deal.`;
+              }
+
+              // Deduct GP
+              gpClearingCell.setValue(-cost); // Subtract GP in clearing house
+              gpTotalCell.setValue(currentGP - cost); // Update GP total
+              gpClearingCell.setValue(""); // Clear clearing house after processing
+
+              console.log(`Deal Activated for Player with Unique ID: ${uniqueId}`);
+              
+              // Log successful purchase
+              gameFeedSheet.appendRow([new Date(), playerName, "GP", -cost, "Deal"]);
+              return `Deal Activated!`;
+          } catch (error) {
+              console.error(`Error in useDeal: ${error.message}`, error.stack);
+              return "An error occurred while activating Deal.";
+          }
+      }
+      function useWheel(uniqueId) {
+          try {
+              console.log("Entering useWheel with uniqueId:", uniqueId); // Log the function entry and input
+
+              const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+              const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+              if (!sheet) {
+                  console.error("XP, Mana, Health sheet not found."); // Log missing sheet
+                  return JSON.stringify({ success: false, message: "Game data sheet not found." });
+              }
+              if (!gameFeedSheet) {
+                  console.error("GameFeed sheet not found."); // Log missing sheet
+                  return JSON.stringify({ success: false, message: "Game log sheet not found." });
+              }
+
+              const playerRow = findPlayerRowById(sheet, uniqueId);
+              if (playerRow === -1) {
+                  console.warn("Player not found with uniqueId:", uniqueId); // Log missing player
+                  return JSON.stringify({ success: false, message: "Player not found." });
+              }
+
+              const playerName = sheet.getRange(playerRow, 1).getValue(); // Player Name
+              const gpTotalCell = sheet.getRange(playerRow, 8); // Column H: GP totals
+              const currentGP = gpTotalCell.getValue() || 0;
+
+              console.log(`Player Name: ${playerName}, Current GP: ${currentGP}`); // Log player details
+
+              if (currentGP < 100) {
+                  console.warn(`Player ${playerName} has insufficient GP (${currentGP}) for Wheel of Destiny.`); // Log insufficient GP
+                  return JSON.stringify({ success: false, message: "Insufficient GP." });
+              }
+
+              // Deduct GP
+              gpTotalCell.setValue(currentGP - 100);
+              console.log(`Deducted 100 GP from player ${playerName}. New GP: ${currentGP - 100}`); // Log deduction
+
+              // Log the event
+              gameFeedSheet.appendRow([new Date(), playerName, "GP", -100, "Wheel of Destiny"]);
+              console.log(`Logged Wheel of Destiny purchase for player ${playerName}.`); // Log gameFeed entry
+
+              return JSON.stringify({ success: true, message: "Wheel of Destiny Purchased!" });
+          } catch (error) {
+              console.error("Error in useWheel:", error); // Log the error
+              return JSON.stringify({ success: false, message: "An error occurred." });
+          }
+      }
+
+      function useTransfiguration(uniqueId) {
+          try {
+              console.log(`useTransfiguration called with Unique ID: ${uniqueId}`);
+              const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+              const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+              const playerRow = findPlayerRowById(sheet, uniqueId);
+
+              if (playerRow === -1) {
+                  console.error(`Player not found for Unique ID: ${uniqueId}`);
+                  return "Player not found.";
+              }
+
+              const playerName = sheet.getRange(playerRow, 1).getValue(); // Column A: Player Name
+              const gpTotalCell = sheet.getRange(playerRow, 8); // Column H: GP totals
+              const currentGP = parseInt(gpTotalCell.getValue(), 10) || 0;
+
+              const cost = 5000; // Cost of Transfiguration
+
+              // Ensure sufficient GP
+              if (currentGP < cost) {
+                  console.log(`Insufficient GP for Transfiguration. Current GP: ${currentGP}`);
+                  
+                  // Log insufficient GP attempt
+                  gameFeedSheet.appendRow([
+                      new Date(), playerName, "GP", 0, "Transfiguration (Insufficient GP)"
+                  ]);
+                  return `You don't have enough GP for Transfiguration.`;
+              }
+
+              // Deduct GP
+              gpTotalCell.setValue(currentGP - cost);
+
+              // Log successful purchase
+              gameFeedSheet.appendRow([
+                  new Date(), playerName, "GP", -cost, "Transfiguration Purchased"
+              ]);
+
+              console.log(`Transfiguration Activated for Player: ${playerName} (ID: ${uniqueId})`);
+              return `Transfiguration Purchased! See the Game Master for your class change.`;
+          } catch (error) {
+              console.error(`Error in useTransfiguration: ${error.message}`, error.stack);
+              return "An error occurred while activating Transfiguration.";
+          }
+      }
+      function useDictator(uniqueId) {
+        try {
+          console.log(`useDictator called with Unique ID: ${uniqueId}`);
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+          const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+          const playerRow = findPlayerRowById(sheet, uniqueId);
+
+          if (playerRow === -1) {
+            console.error(`Player not found for Unique ID: ${uniqueId}`);
+            return "Player not found.";
+          }
+
+          const playerName = sheet.getRange(playerRow, 1).getValue(); // Column A: Player Name
+          const gpTotalCell = sheet.getRange(playerRow, 8); // Column H: GP totals
+          const gpClearingCell = sheet.getRange(playerRow, 12); // Column L: GP clearing house
+          const currentGP = gpTotalCell.getValue() || 0;
+
+          const cost = 500; // Cost of The Dictator
+          if (currentGP < cost) {
+            console.log(`Insufficient GP for The Dictator. Current GP: ${currentGP}`);
+            gameFeedSheet.appendRow([new Date(), playerName, "GP", 0, "The Dictator (Insufficient GP)"]);
+            return `You don't have enough GP for The Dictator.`;
+          }
+
+          // Deduct GP
+          gpClearingCell.setValue(-cost);
+          gpTotalCell.setValue(currentGP - cost);
+          gpClearingCell.setValue(""); // Clear clearing house after processing
+
+          // Compose dramatic message
+      const message = `The people have voted… but ${playerName} has spoken. This week's review will be whatever the Dictator Wants!`;
+
+
+          // Log to GameFeed
+          gameFeedSheet.appendRow([new Date(), playerName, "GP", -cost, `The Dictator — ${message}`]);
+
+          console.log(`The Dictator Activated for ${playerName}`);
+          return message;
+        } catch (error) {
+          console.error(`Error in useDictator: ${error.message}`, error.stack);
+          return "An error occurred while activating The Dictator.";
+        }
+      }
+
+      function useAI(uniqueId) {
+          try {
+              console.log(`useAI called with Unique ID: ${uniqueId}`);
+              const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+              const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+              const playerRow = findPlayerRowById(sheet, uniqueId);
+
+              if (playerRow === -1) {
+                  console.error(`Player not found for Unique ID: ${uniqueId}`);
+                  return "Player not found.";
+              }
+
+              const playerName = sheet.getRange(playerRow, 1).getValue(); // Column A: Player Name
+              const gpTotalCell = sheet.getRange(playerRow, 8); // Column H: GP totals
+              const gpClearingCell = sheet.getRange(playerRow, 12); // Column L: GP clearing house
+              const currentGP = gpTotalCell.getValue() || 0;
+
+              const cost = 1000; // Cost of AI Feeder
+              if (currentGP < cost) {
+                  console.log(`Insufficient GP for AI Feeder. Current GP: ${currentGP}`);
+                  
+                  // Log insufficient GP attempt
+                  gameFeedSheet.appendRow([new Date(), playerName, "GP", 0, "AI Feeder (Insufficient GP)"]);
+                  return `You don't have enough GP for the AI Feeder.`;
+              }
+
+              // Deduct GP
+              gpClearingCell.setValue(-cost); // Subtract GP in clearing house
+              gpTotalCell.setValue(currentGP - cost); // Update GP total
+              gpClearingCell.setValue(""); // Clear clearing house after processing
+
+              console.log(`AI Feeder Activated for Player with Unique ID: ${uniqueId}`);
+              
+              // Log successful purchase
+              gameFeedSheet.appendRow([new Date(), playerName, "GP", -cost, "AI Feeder"]);
+              return `AI Feeder Activated!`;
+          } catch (error) {
+              console.error(`Error in useAI: ${error.message}`, error.stack);
+              return "An error occurred while activating the AI Feeder.";
+          }
+      }
+      function useCollaborator(uniqueId) {
+          try {
+              console.log(`useCollaborator called with Unique ID: ${uniqueId}`);
+              const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+              const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+              const playerRow = findPlayerRowById(sheet, uniqueId);
+
+              if (playerRow === -1) {
+                  console.error(`Player not found for Unique ID: ${uniqueId}`);
+                  return "Player not found.";
+              }
+
+              const playerName = sheet.getRange(playerRow, 1).getValue(); // Column A: Player Name
+              const gpTotalCell = sheet.getRange(playerRow, 8); // Column H: GP totals
+              const gpClearingCell = sheet.getRange(playerRow, 12); // Column L: GP clearing house
+              const currentGP = gpTotalCell.getValue() || 0;
+
+              const cost = 500; // Cost of Collaborator
+              if (currentGP < cost) {
+                  console.log(`Insufficient GP for Collaborator. Current GP: ${currentGP}`);
+                  
+                  // Log insufficient GP attempt
+                  gameFeedSheet.appendRow([new Date(), playerName, "GP", 0, "Collaborator (Insufficient GP)"]);
+                  return `You don't have enough GP for the Collaborator.`;
+              }
+
+              // Deduct GP
+              gpClearingCell.setValue(-cost); // Subtract GP in clearing house
+              gpTotalCell.setValue(currentGP - cost); // Update GP total
+              gpClearingCell.setValue(""); // Clear clearing house after processing
+
+              console.log(`Collaborator Activated for Player with Unique ID: ${uniqueId}`);
+              
+              // Log successful purchase
+              gameFeedSheet.appendRow([new Date(), playerName, "GP", -cost, "Collaborator"]);
+              return `Collaborator Activated!`;
+          } catch (error) {
+              console.error(`Error in useCollaborator: ${error.message}`, error.stack);
+              return "An error occurred while activating the Collaborator.";
+          }
+      }
+
+      function useBag(uniqueId) {
+          try {
+              console.log(`useBag called with Unique ID: ${uniqueId}`);
+              const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+              const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+              const playerRow = findPlayerRowById(sheet, uniqueId);
+
+              if (playerRow === -1) {
+                  console.error(`Player not found for Unique ID: ${uniqueId}`);
+                  return "Player not found.";
+              }
+
+              const playerName = sheet.getRange(playerRow, 1).getValue(); // Column A
+              const playerClass = sheet.getRange(playerRow, 2).getValue(); // Column B
+              const playerLevel = sheet.getRange(playerRow, 3).getValue(); // Column C
+
+              const gpTotalCell = sheet.getRange(playerRow, 8);    // Column H: GP total
+              const gpClearingCell = sheet.getRange(playerRow, 12); // Column L: GP clearing
+              const crystalClearingCell = sheet.getRange(playerRow, 11); // Column K: Crystal clearing
+              const crystalTotalCell = sheet.getRange(playerRow, 7);     // Column G: Crystals total
+
+              const currentGP = gpTotalCell.getValue() || 0;
+              const currentCrystals = crystalTotalCell.getValue() || 0;
+              const cost = 800;
+
+              // Check if player has enough GP
+              if (currentGP < cost) {
+                  console.log(`Insufficient GP for Bag of Crystals. Current GP: ${currentGP}`);
+                  gameFeedSheet.appendRow([new Date(), playerName, "GP", 0, "Bag of Crystals (Insufficient GP)"]);
+                  return `You don't have enough GP for the Bag of Crystals.`;
+              }
+
+              // Deduct GP and clear clearing house
+              gpTotalCell.setValue(currentGP - cost);
+              gpClearingCell.setValue("");
+
+              // Determine dynamic max crystals based on class and level
+              const { maxCrystals } = getMaxValues(playerClass, playerLevel);
+
+              // Calculate how many crystals can be added to top off
+              const crystalsToAdd = maxCrystals - currentCrystals;
+
+              if (crystalsToAdd <= 0) {
+                  gameFeedSheet.appendRow([new Date(), playerName, "GP", -cost, "Bag of Crystals (No Effect)"]);
+                  return `You already have the maximum number of crystals. Bag of Crystals had no effect, but 800 GP was spent.`;
+              }
+
+              // Add the crystals, respecting cap
+              crystalClearingCell.setValue(crystalsToAdd);
+              crystalTotalCell.setValue(currentCrystals + crystalsToAdd);
+              crystalClearingCell.setValue("");
+
+              // Log results
+              gameFeedSheet.appendRow([new Date(), playerName, "GP", -cost, "Bag of Crystals"]);
+              gameFeedSheet.appendRow([new Date(), playerName, "Crystals", crystalsToAdd, "Bag of Crystals"]);
+
+              console.log(`Bag of Crystals Activated for ${playerName}`);
+              return `Bag of Crystals Activated! You gained ${crystalsToAdd} crystals.`;
+
+          } catch (error) {
+              console.error(`Error in useBag: ${error.message}`, error.stack);
+              return "An error occurred while activating the Bag of Crystals.";
+          }
+      }
+
+
+      function useFreedomPower(uniqueId) {
+          try {
+              const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+              const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+              const playerRow = findPlayerRowById(sheet, uniqueId);
+
+              if (playerRow === -1) {
+                  return "Player not found.";
+              }
+
+              const playerName = sheet.getRange(playerRow, 1).getValue();
+              const gpTotalCell = sheet.getRange(playerRow, 8); // Column H: GP total
+              const currentGP = gpTotalCell.getValue() || 0;
+
+              const cost = 1500; // Cost for Freedom Power
+              if (currentGP < cost) {
+                  gameFeedSheet.appendRow([new Date(), playerName, "GP", 0, "Freedom Power (Insufficient GP)"]);
+                  return "You don't have enough GP.";
+              }
+
+              // Deduct GP
+              gpTotalCell.setValue(currentGP - cost);
+
+              // Log the purchase in GameFeed
+              gameFeedSheet.appendRow([new Date(), playerName, "GP", -cost, "Purchased Freedom Power"]);
+
+              return "You have gained the power of Freedom!";
+          } catch (error) {
+              console.error(`Error in useFreedomPower: ${error.message}`);
+              return "An error occurred.";
+          }
+      }
+      function useLevelUp(uniqueId) {
+          try {
+              console.log(`useLevelUp called with Unique ID: ${uniqueId}`);
+              const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+              const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+              const playerRow = findPlayerRowById(sheet, uniqueId);
+
+              if (playerRow === -1) {
+                  console.error(`Player not found for Unique ID: ${uniqueId}`);
+                  return "Player not found.";
+              }
+
+              const playerName = sheet.getRange(playerRow, 1).getValue(); // Column A: Player Name
+              const gpTotalCell = sheet.getRange(playerRow, 8); // Column H: GP total
+              const gpClearingCell = sheet.getRange(playerRow, 12); // Column L: GP clearing house
+              const xpTotalCell = sheet.getRange(playerRow, 5); // Column E: XP total
+
+              const currentGP = parseInt(gpTotalCell.getValue(), 10) || 0;
+              const currentXP = parseInt(xpTotalCell.getValue(), 10) || 0;
+
+              const cost = 3000; // Cost of Level Up
+              const addedXP = 1500; // Amount of XP added
+
+              // Ensure sufficient GP
+              if (currentGP < cost) {
+                  console.log(`Insufficient GP for Level Up. Current GP: ${currentGP}`);
+                  
+                  // Log insufficient GP attempt
+                  gameFeedSheet.appendRow([
+                      new Date(), playerName, "GP", 0, "Level Up (Insufficient GP)"
+                  ]);
+                  return `You don't have enough GP for Level Up.`;
+              }
+
+              // Deduct GP
+              gpTotalCell.setValue(currentGP - cost);
+              gpClearingCell.setValue(""); // Clear column L explicitly
+
+              // Add XP directly to Column E (no column I involvement)
+              xpTotalCell.setValue(currentXP + addedXP);
+
+              // Log actions in GameFeed
+              gameFeedSheet.appendRow([new Date(), playerName, "GP", -cost, "Level Up"]);
+              gameFeedSheet.appendRow([new Date(), playerName, "XP", addedXP, "Level Up"]);
+
+              // Run updatePlayerLevels() immediately to reflect level-up changes
+              updatePlayerLevels();
+
+              console.log(`Level Up Activated for Player: ${playerName} (ID: ${uniqueId})`);
+              return `Level Up Activated! You've gained 1500 XP!`;
+          } catch (error) {
+              console.error(`Error in useLevelUp: ${error.message}`, error.stack);
+              return "An error occurred while activating Level Up.";
+          }
+      }
+
+
+      function useComingSoon(uniqueId) {
+          try {
+              const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+              const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+              const playerRow = findPlayerRowById(sheet, uniqueId);
+
+              if (playerRow === -1) {
+                  return "Player not found.";
+              }
+
+              const playerName = sheet.getRange(playerRow, 1).getValue();
+              const gpTotalCell = sheet.getRange(playerRow, 8); // Column H: GP total
+              const currentGP = gpTotalCell.getValue() || 0;
+
+              const cost = 1;
+              if (currentGP < cost) {
+                  gameFeedSheet.appendRow([new Date(), playerName, "GP", 0, "Coming Soon (Insufficient GP)"]);
+                  return "You don't have enough GP.";
+              }
+
+              gpTotalCell.setValue(currentGP - cost);
+              gameFeedSheet.appendRow([new Date(), playerName, "GP", -cost, "Coming Soon"]);
+              return "The Seller is bringing new items.";
+          } catch (error) {
+              console.error(`Error in useComingSoon: ${error.message}`);
+              return "An error occurred.";
+          }
+      }
+
+      function useShadowSwap(uniqueId) {
+          try {
+              const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+              const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+              const playerRow = findPlayerRowById(sheet, uniqueId);
+
+              if (playerRow === -1) {
+                  return "Player not found.";
+              }
+
+              const playerName = sheet.getRange(playerRow, 1).getValue();
+              const gpTotalCell = sheet.getRange(playerRow, 8); // Column H: GP total
+              const currentGP = gpTotalCell.getValue() || 0;
+
+              const cost = 333;
+              if (currentGP < cost) {
+                  gameFeedSheet.appendRow([new Date(), playerName, "GP", 0, "Shadow Swap (Insufficient GP)"]);
+                  return "You don't have enough GP.";
+              }
+
+              // Deduct GP
+              gpTotalCell.setValue(currentGP - cost);
+              
+              // Log the purchase
+              gameFeedSheet.appendRow([new Date(), playerName, "GP", -cost, "Shadow Swap"]);
+
+              return "You have invoked the Shadow Swap!";
+          } catch (error) {
+              console.error(`Error in useShadowSwap: ${error.message}`);
+              return "An error occurred.";
+          }
+      }
+      function useTheTactician(uniqueId) {
+        const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+        const gameFeedSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+
+        const playerRow = findPlayerRowById(sheet, uniqueId);
+        if (playerRow === -1) return "❌ Player not found.";
+
+        const playerName = sheet.getRange(playerRow, 1).getValue(); // Column A: Player Name
+        const gpTotalCell = sheet.getRange(playerRow, 8); // Column H: GP totals
+        const gpClearingCell = sheet.getRange(playerRow, 12); // Column L: GP clearing house
+        const currentGP = gpTotalCell.getValue() || 0;
+
+        const cost = 600; // Cost of The Tactician
+
+        if (currentGP < cost) {
+          gameFeedSheet.appendRow([new Date(), playerName, "GP", 0, "The Tactician (Insufficient GP)"]);
+          return "❌ You don't have enough GP for The Tactician.";
+        }
+
+        // Deduct GP
+        gpClearingCell.setValue(-cost); // Send deduction to the clearing house
+        gpTotalCell.setValue(currentGP - cost); // Update GP total immediately
+        gpClearingCell.setValue(""); // Clear the clearing house
+
+        // Log to GameFeed
+        gameFeedSheet.appendRow([new Date(), playerName, "GP", -cost, "The Tactician"]);
+
+        return `The Tactician activated! You may now retry any one assignment.`;
+      }
+
+      function addGoldPieces(uniqueId, amount) {
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+          const playerRow = findPlayerRowById(sheet, uniqueId);
+          if (playerRow === -1) return "Player not found.";
+
+          const gpTotalCell = sheet.getRange(playerRow, 8); // Column H: Gold Pieces
+          const currentGP = gpTotalCell.getValue() || 0;
+          gpTotalCell.setValue(currentGP + amount);
+
+          logGameAction(sheet.getRange(playerRow, 1).getValue(), "GP", amount, "Wheel of Destiny");
+          return "GP added successfully.";
+      }
+
+      // Global variable to hold the latest 10 entries for the tickertape
+      const latestTickerData = []; // Holds the latest 19 entries for the tickertape
+
+      // Function to fetch the latest 10 entries from GameFeed
+      // Get latest 10 entries from GameFeed
+      function getLatestGameFeedEntries() {
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+          if (!sheet) {
+              console.error("GameFeed sheet not found.");
+              return [];
+          }
+
+          const lastRow = sheet.getLastRow();
+          const numEntries = 10;
+          const startRow = Math.max(2, lastRow - numEntries + 1); // Prevent going above row 2 (headers)
+
+          const data = sheet.getRange(startRow, 2, lastRow - startRow + 1, 9).getValues();
+          console.log("Backend: Latest entries for tickertape:", data); // Debug log
+          return data.reverse(); // Reverse to show most recent entries first
+      }
+
+      // Update tickertape data
+      function broadcastTickertapeUpdate(newData) {
+          console.log("Backend: Broadcasting tickertape update:", newData); // Debug log
+          latestTickerData.length = 0; // Clear old data
+          latestTickerData.push(...newData); // Push new data
+      }
+
+      // Function to provide the latest tickertape data to the frontend
+      function getLiveTickerData() {
+        console.log("Live ticker data:", latestTickerData); // Debug log
+        console.log("Backend: Latest ticker data:", latestTickerData); // Debug log
+          if (!latestTickerData.length) {
+              // Fetch the initial data if ticker data is empty
+              const initialData = getLatestGameFeedEntries();
+              latestTickerData.push(...initialData);
+          }
+          console.log("Serving live ticker data:", latestTickerData); // Debug
+          return latestTickerData;
+      }
+
+      // Function to delete GameFeed entries older than 10 days
+      function deleteOldLogEntries() {
+          const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+          if (!sheet) {
+              console.error("GameFeed sheet not found.");
+              return;
+          }
+
+          const today = new Date();
+          const lastRow = sheet.getLastRow();
+
+          if (lastRow < 2) {
+              console.log("No log entries to delete.");
+              return;
+          }
+
+          const data = sheet.getRange(2, 1, lastRow - 1, 1).getValues(); // Column A contains timestamps
+          const rowsToDelete = [];
+
+          for (let i = 0; i < data.length; i++) {
+              const logDate = new Date(data[i][0]);
+              const diffInDays = (today - logDate) / (1000 * 60 * 60 * 24); // Convert milliseconds to days
+              if (diffInDays > 10) {
+                  rowsToDelete.push(i + 2); // Add the row number (offset by 2 to account for the header)
+              }
+          }
+
+          // Delete rows in reverse to avoid shifting row indices
+          for (let i = rowsToDelete.length - 1; i >= 0; i--) {
+              sheet.deleteRow(rowsToDelete[i]);
+          }
+
+          // ✅ Ensure the sheet always has at least 1000 rows after deletions
+          if (sheet.getMaxRows() < 1000) {
+              sheet.insertRowsAfter(sheet.getMaxRows(), 1000 - sheet.getMaxRows());
+          }
+
+          console.log(`Deleted ${rowsToDelete.length} old log entries.`);
+      }
+
+      function checkPlayerHealthAndAffectTeammates() {
+        const ss = SpreadsheetApp.getActiveSpreadsheet();
+        const xpSheet = ss.getSheetByName('XP, Mana, Health');
+        const gameFeedSheet = ss.getSheetByName('GameFeed');
+
+        const healthCol = 6;  // Column F
+        const classCol = 2;   // Column B
+        const levelCol = 3;   // Column C
+        const teamCol = 13;   // Column M
+        const nameCol = 1;    // Column A
+        const currentTime = new Date();
+
+        const data = xpSheet.getRange(2, 1, xpSheet.getLastRow() - 1, xpSheet.getLastColumn()).getValues(); // All rows except headers
+        const teamsMap = {};
+
+        // Group players by team
+        data.forEach(row => {
+          const playerName = row[nameCol - 1];
+          const health = row[healthCol - 1];
+          const team = row[teamCol - 1];
+
+          if (team) {
+            if (!teamsMap[team]) teamsMap[team] = [];
+            teamsMap[team].push({ playerName, health });
+          }
+        });
+
+        // Adjust teammates when someone falls
+        for (const [team, members] of Object.entries(teamsMap)) {
+          for (const player of members) {
+            if (player.health <= 0) {
+              Logger.log(`${player.playerName} has fallen! Adjusting team ${team}...`);
+
+              members.forEach(teammate => {
+                if (teammate.playerName !== player.playerName) {
+                  const rowIndex = data.findIndex(row => row[nameCol - 1] === teammate.playerName) + 2;
+                  const currentHealth = xpSheet.getRange(rowIndex, healthCol).getValue();
+
+                  if (currentHealth > 0) {
+                    const newHealth = Math.max(0, currentHealth - 1);
+                    xpSheet.getRange(rowIndex, healthCol).setValue(newHealth);
+                    gameFeedSheet.appendRow([
+                      currentTime,
+                      teammate.playerName,
+                      'Health',
+                      -1,
+                      'A Teammate Fell'
+                    ]);
+                  }
+                }
+              });
+            }
+          }
+        }
+
+        // Respawn fallen players to 1 heart
+        data.forEach((row, index) => {
+          const playerName = row[nameCol - 1];
+          const playerClass = row[classCol - 1];
+          const playerLevel = row[levelCol - 1];
+          const health = row[healthCol - 1];
+
+          if (health <= 0) {
+            const rowIndex = index + 2;
+            const { maxHealth } = getMaxValues(playerClass, playerLevel); // Fetch dynamic cap (not directly needed here but ready for future logic)
+
+            xpSheet.getRange(rowIndex, healthCol).setValue(1); // Set to 1 heart only
+            gameFeedSheet.appendRow([
+              currentTime,
+              playerName,
+              'Health',
+              'Set to 1',
+              `${playerName} Fell and was Respawned with 1 Heart`
+            ]);
+          }
+        });
+      }
+
+
+      function updateCrystalExchangeRate() {
+        const sheet = SpreadsheetApp.getActive().getSheetByName('Crystal Exchange');
+        const today = new Date();
+        const todayStr = Utilities.formatDate(today, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+
+        const lastRow = sheet.getLastRow();
+        const lastRate = parseFloat(sheet.getRange(lastRow, 2).getValue());
+
+        let newRate = lastRate;
+
+        // Small random movement (±2 to ±4 GP)
+        const dailyChange = (Math.random() < 0.5 ? -1 : 1) * (Math.random() * 2 + 2);
+        newRate += dailyChange;
+
+        // Clamp to 120–150 GP range
+        newRate = Math.max(120, Math.min(150, newRate));
+        newRate = parseFloat(newRate.toFixed(2));
+
+        // 2% chance of a crash or spike
+        if (Math.random() < 0.02) {
+          newRate = Math.random() < 0.5 ? 120 : 150;
+        }
+
+        // Write new rate only if today hasn't been logged
+        const lastDate = sheet.getRange(lastRow, 1).getValue();
+        const lastDateStr = Utilities.formatDate(new Date(lastDate), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+
+        if (lastDateStr !== todayStr) {
+          sheet.appendRow([todayStr, newRate]);
+        }
+      }
+
+
+      function buyOneCrystal(uniqueId) {
+        const ss = SpreadsheetApp.getActive();
+        const sheet = ss.getSheetByName("XP, Mana, Health");
+        const rateSheet = ss.getSheetByName("Crystal Exchange");
+
+        const playerRow = findPlayerRowById(sheet, uniqueId);
+        if (playerRow === -1) {
+          Logger.log("❌ Player not found for Unique ID: " + uniqueId);
+          return "❌ Player not found.";
+        }
+
+        const playerName = sheet.getRange(playerRow, 1).getValue();   // Column A
+        const gp = sheet.getRange(playerRow, 8).getValue();           // Column H
+        const vault = sheet.getRange(playerRow, 16).getValue() || 0;  // Column P (1-based index)
+        const todayRate = rateSheet.getRange(rateSheet.getLastRow(), 2).getValue();
+
+        if (gp < todayRate) {
+          return "❌ You don't have enough GP to buy a crystal.";
+        }
+
+        // Subtract GP, add to Vault
+        sheet.getRange(playerRow, 8).setValue(parseFloat((gp - todayRate).toFixed(2))); // GP
+        sheet.getRange(playerRow, 16).setValue(vault + 1); // Vault (Column P)
+
+        logGameAction(playerName, "Vault", "'+1 (Buy)'", `@ ${todayRate} GP`);
+        logGameAction(playerName, "Gold Pieces", "'–" + todayRate.toFixed(2) + " GP'", "Buy Crystal");
+
+        return `✅ Bought 1 Vaulted Crystal for ${todayRate.toFixed(2)} GP`;
+      }
+
+
+      function sellOneCrystal(uniqueId) {
+        const ss = SpreadsheetApp.getActive();
+        const sheet = ss.getSheetByName("XP, Mana, Health");
+        const rateSheet = ss.getSheetByName("Crystal Exchange");
+
+        const playerRow = findPlayerRowById(sheet, uniqueId);
+        if (playerRow === -1) return "❌ Player not found.";
+
+        const usableCrystals = sheet.getRange(playerRow, 7).getValue(); // Column G
+        const gp = sheet.getRange(playerRow, 8).getValue();             // Column H
+        const playerName = sheet.getRange(playerRow, 1).getValue();
+        const rate = rateSheet.getRange(rateSheet.getLastRow(), 2).getValue();
+
+        if (!usableCrystals || usableCrystals < 1) {
+          return "❌ You don't have any usable crystals to sell.";
+        }
+
+        // Subtract 1 from usable crystals (G), add GP (H)
+        sheet.getRange(playerRow, 7).setValue(usableCrystals - 1);
+        sheet.getRange(playerRow, 8).setValue(parseFloat((gp + rate).toFixed(2)));
+
+        // Log the transaction
+        logGameAction(playerName, "Crystals", "-1 (Sell)", `@ ${rate.toFixed(2)} GP`);
+        logGameAction(playerName, "Gold Pieces", `+${rate.toFixed(2)} GP`, "Sell Crystal");
+
+        return `✅ Sold 1 crystal for ${rate.toFixed(2)} GP`;
+      }
+
+
+      function cashOutVaultedCrystals(uniqueId) {
+        const ss = SpreadsheetApp.getActive();
+        const sheet = ss.getSheetByName("XP, Mana, Health");
+        const rateSheet = ss.getSheetByName("Crystal Exchange");
+
+        const playerRow = findPlayerRowById(sheet, uniqueId);
+        if (playerRow === -1) {
+          console.error(`Player not found for Unique ID: ${uniqueId}`);
+          return "❌ Player not found.";
+        }
+
+        const playerName = sheet.getRange(playerRow, 1).getValue();   // Column A
+        const gp = sheet.getRange(playerRow, 8).getValue();           // Column H
+        const vault = sheet.getRange(playerRow, 16).getValue() || 0;  // Column P
+        const todayRate = rateSheet.getRange(rateSheet.getLastRow(), 2).getValue();
+
+        if (vault <= 0) {
+          return "❌ No crystals in your vault to cash out.";
+        }
+
+        const gpEarned = parseFloat((vault * todayRate).toFixed(2));
+
+        // Apply updates
+        sheet.getRange(playerRow, 8).setValue(parseFloat((gp + gpEarned).toFixed(2))); // Add GP
+        sheet.getRange(playerRow, 16).setValue(0); // Clear Vault
+
+        logGameAction(playerName, "Vault", `'-${vault} Crystals'`, "Cashed Out");
+        logGameAction(playerName, "Gold Pieces", `' +${gpEarned.toFixed(2)} GP'`, `@ ${todayRate} GP/Crystal`);
+
+        return `✅ You cashed out ${vault} Vaulted Crystals for ${gpEarned.toFixed(2)} GP`;
+      }
+
+      function getCrystalExchangeDataForPlayer(uniqueId) {
+  Logger.log("🛠️ LIVE version of getCrystalExchangeDataForPlayer called");
+
+  const ss = SpreadsheetApp.getActive();
+  const xpSheet = ss.getSheetByName("XP, Mana, Health");
+  const rateSheet = ss.getSheetByName("Crystal Exchange");
+
+  const playerRow = findPlayerRowById(xpSheet, uniqueId);
+  if (playerRow === -1) return null;
+
+  const vault = xpSheet.getRange(playerRow, 16).getValue() || 0;
+  const lastRow = rateSheet.getLastRow();
+  const startRow = Math.max(2, lastRow - 6);
+  const rawRates = rateSheet.getRange(startRow, 1, lastRow - startRow + 1, 2).getValues();
+
+  const rates = rawRates
+    .filter(([date, rate]) => date && rate)
+    .map(([date, rate]) => ({ date, rate }));
+
+  const response = {
+    vault: Number(vault),
+    rates: rates.map(r => ({ date: String(r.date), rate: Number(r.rate) }))
+  };
+
+  Logger.log("✅ Sending back clean response: " + JSON.stringify(response));
+  return response;
+}
+
+      function logSpriteCatch(playerId) {
+        const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("XP, Mana, Health");
+        const gameFeed = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("GameFeed");
+
+        const row = findPlayerRowById(sheet, playerId);
+        if (row === -1) return "Player not found.";
+
+        const playerName = sheet.getRange(row, 1).getValue(); // Column A = Player Name
+        const timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy/MM/dd HH:mm:ss");
+
+        gameFeed.appendRow([timestamp, playerName, "GP", "+50 (Sprite Catch - Tell Mr.Watts)", "Sprite"]);
+
+        return `${playerName} caught a sprite! (+50 GP pending)`;
+      }
+}
