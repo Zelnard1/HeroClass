@@ -67,3 +67,6 @@ node_modules/
 
 # dataconnect generated files
 .dataconnect
+# Ignore sensitive Firebase service account key
+firebase-power-script/serviceAccountKey.json.json
+
