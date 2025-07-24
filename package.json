@@ -1,15 +1,19 @@
 {
-  "name": "classcraft-local",
+  "name": "heroclass-web-app",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsc"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "firebase-admin": "^13.4.0"
+    "firebase": "^9.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
   }
 }
+
